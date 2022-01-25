@@ -1,3 +1,5 @@
+* Modified to support similar device that handles parameters differently (Johnson Controls Skyport)
+
 # Venstar ColorTouch Thermostat Driver for Hubitat Elevation
 
 <small>By [toggledbits](https://www.toggledbits.com/)</small>
