@@ -13,6 +13,8 @@
  *  Revision History
  *  Stamp By           Description
  *  ----- ------------ ---------------------------------------------------------
+ *  1/25/22 chrisjunkstore Modified to support similar device that handles param
+ *                         eters differently (Johnson Controls Skyport)
  *  21334 toggledbits  Trim input on mode commands; the dashboard seems to be
  *                     passing values with extra spaces.
  *  21270 toggledbits  Settable temp units; T2000/5x00/6x00 support.
@@ -454,6 +456,60 @@ private def _request( rp, callback ) {
     }
 }
 
+private def _requestPost( rp, callback ) {
+    D("_requestPost(${rp}, callback")
+    def tries = 0
+    while ( tries++ < 3 ) {
+        try {
+            if ( rp.headers?.Authorization == null ) {
+                state.authmethod = 'none'
+            }
+            if ( "https" == requestProto ) {
+                rp.ignoreSSLIssues = true
+            }
+            D("_requestPost() sending request ${rp}")
+            httpPost( rp ) { resp->callback.call( resp, null ) }
+            break
+        } catch ( groovyx.net.http.HttpResponseException e ) {
+            D("response exception caught ${e.class} ${e}")
+            if ( e.getResponse().getStatus() == 401 && "" != authUser ) {
+                if ( rp.headers?.Authorization != null ) {
+                    D("Attempted auth failed with ${rp.headers.Authorization}")
+                    state.nc = 0
+                    callback.call( e.getResponse(), null );
+                    break;
+                }
+                /* Do auth if we can */
+                def authstring = e.getResponse().headers.'www-authenticate'
+                // ??? What if multiple www-authenticate headers are returned? We need to pick a supported algorithm...
+                def ah
+                if ( authstring.startsWith( 'Digest ' ) ) {
+                    def authmap = authstring.replaceAll("Digest ", "").replaceAll(", ", ",").findAll(/([^,=]+)=([^,]+)/) { full, name, value -> [name, value.replaceAll("\"", "")] }.collectEntries( { it })
+                    ah = digestAuth( new java.net.URI( rp.uri ).getPath(), authmap );
+                    state.authmethod = 'digest'
+                } else {
+                    ah = basicAuth();
+                    state.authmethod = 'basic'
+                }
+                if ( rp.headers == null ) {
+                    rp.headers = [ 'Authorization': ah ]
+                } else {
+                    rp.headers.Authorization = ah
+                }
+                D("_requestPost resubmitting with ${rp.headers}")
+                madeWithAuth = true;
+            } else {
+                callback.call( e.getResponse(), null );
+                break;
+            }
+        } catch( e ) {
+            E( "${e.class} ${e}" )
+            callback.call( null, e )
+            break
+        }
+    }
+}
+
 private def defaultCommandCallback( resp, err ) {
     // def result = resp.data
     /* Unconditionally schedule refresh */
@@ -470,28 +526,44 @@ private def defaultCommandCallback( resp, err ) {
 
 private def sendCommand( command, reqparams, callback=null ) {
     D("sendCommand(${command}, ${reqparams})")
-    def uri = "${requestProto}://${thermostatIp}/${command}?"
+    def parambody = ""
+    def uri = "${requestProto}://${thermostatIp}/${command}"
+
     if ( reqparams instanceof java.util.Map ) {
         D("sendCommand handling ${command} reqparams as Map")
-        reqparams.each( { key, val -> uri += "${key}=${val}&" } );
+        reqparams.each( { key, val -> parambody += "${key}=${val}&" } );
     } else if ( reqparams instanceof java.util.List ) {
         D("sendCommand handling ${command} reqparams as List")
         def li = reqparams.listIterator();
         while ( li.hasNext() ) {
             def el = li.next()
-            uri += "${el.key}=${el.value}&"
+            parambody += "${el.key}=${el.value}&"
         }
     } else if ( reqparams != null ) {
         E("bug, can't handle reqparams=${reqparams.class}")
     }
     D("sending request to ${uri.toString()}")
-    def params = [
-        uri: uri,
-        contentType: "application/json",
-        requestContentType: "application/x-www-form-urlencoded",
-        timeout: 15
-    ]
-    _request( params, callback ?: { r,e -> defaultCommandCallback(r,e) } )
+
+    if ( command == "control" || command == "settings") {
+        def params = [
+            uri: uri,
+            contentType: "application/json",
+            requestContentType: "application/x-www-form-urlencoded",
+            body: parambody,
+            timeout: 15
+        ]
+        _requestPost( params, callback ?: { r,e -> defaultCommandCallback(r,e) } )
+    }
+    else {
+        def params = [
+            uri: uri,
+            contentType: "application/json",
+            requestContentType: "application/x-www-form-urlencoded",
+            timeout: 15
+        ]   
+        _request( params, callback ?: { r,e -> defaultCommandCallback(r,e) } )
+    }
+
 }
 
 private def control() {
